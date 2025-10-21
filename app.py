@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-# 최근 L년 평균 vs 실제 — 균형 비교(후보수 동일) + 최적 L 추이 + 최근(1–3년) 최적 연도 시각화
+# 최근 L년 평균 vs 실제 — 균형 비교(후보 수 동일) 중심
+# 3번째 섹션(도넛+최적L추이+최근최적연도 시각화)을 유지하고,
+# 그 데이터의 표와 '군집 히트맵(최근/중간/장기)'을 추가.
 
 from pathlib import Path
 import re
@@ -11,14 +13,14 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="최근 L년 평균 vs 실제 — 균형 비교", layout="wide")
 
-# ========== 공통 레이아웃 ==========
+# --------------------- 레이아웃 공통 ---------------------
 def tidy_layout(fig, title=None, height=360):
     if title:
         fig.update_layout(title=title, title_pad=dict(t=28, l=6, r=6, b=6))
     fig.update_layout(height=height, margin=dict(l=70, r=30, t=80, b=60))
     return fig
 
-# ========== 엑셀 파서(와이드/롱 자동) ==========
+# --------------------- 엑셀 파서 ---------------------
 MONTH_ALIASES = {
     "jan":1,"january":1,"1":1,"01":1,"1월":1,
     "feb":2,"february":2,"2":2,"02":2,"2월":2,
@@ -110,22 +112,19 @@ def load_excel_any(path_or_buf):
         if parsed is not None: return parsed, sh, "long"
     return None, None, None
 
-# ========== 유틸 ==========
+# --------------------- 유틸 ---------------------
 def r2(y, yp):
     y = np.array(y, dtype=float); yp = np.array(yp, dtype=float)
-    mask = ~(np.isnan(y) | np.isnan(yp))
-    y, yp = y[mask], yp[mask]
+    m = ~(np.isnan(y) | np.isnan(yp))
+    y, yp = y[m], yp[m]
     if y.size < 2: return np.nan
     sse = np.sum((y-yp)**2); sst = np.sum((y-y.mean())**2)
     return float(1 - sse/sst) if sst>0 else np.nan
 
-def month_mask(series_month, heating_mode: str):
-    if heating_mode == "all":   # 전월
-        return np.ones_like(series_month, dtype=bool)
-    if heating_mode == "11-3":  # 난방월
-        return series_month.isin([11,12,1,2,3])
-    if heating_mode == "10-3":  # 난방확장
-        return series_month.isin([10,11,12,1,2,3])
+def month_mask(series_month, heating_mode:str):
+    if heating_mode == "all":   return np.ones_like(series_month, dtype=bool)
+    if heating_mode == "11-3":  return series_month.isin([11,12,1,2,3])
+    if heating_mode == "10-3":  return series_month.isin([10,11,12,1,2,3])
     return np.ones_like(series_month, dtype=bool)
 
 def build_y_true(df, Y:int, heating_mode:str):
@@ -144,20 +143,7 @@ def build_pred_from_train(df, start:int, end:int, months_order:list, heating_mod
         preds.append(np.mean(x) if x.size>0 else np.nan)
     return np.array(preds, dtype=float)
 
-def bootstrap_ci(values, B=4000, alpha=0.05, seed=1234):
-    vals = np.array(values, dtype=float); vals = vals[~np.isnan(vals)]
-    if len(vals) == 0: return np.nan, np.nan, np.nan
-    rng = np.random.default_rng(seed); n = len(vals)
-    boots = np.empty(B, dtype=float)
-    for i in range(B):
-        sample = rng.choice(vals, size=n, replace=True)
-        boots[i] = np.mean(sample)
-    boots.sort()
-    lo = boots[int((alpha/2)*B)]
-    hi = boots[int((1-alpha/2)*B)-1]
-    return float(np.mean(vals)), float(lo), float(hi)
-
-# ========== 데이터 로딩 ==========
+# --------------------- 데이터 로딩 ---------------------
 default_path = Path("기온예측.xlsx")
 uploaded = st.file_uploader("월별 평균기온 파일 업로드 (.xlsx)", type=["xlsx"])
 df, used_sheet, mode = None, None, None
@@ -165,6 +151,7 @@ if uploaded:
     df, used_sheet, mode = load_excel_any(uploaded)
 elif default_path.exists():
     df, used_sheet, mode = load_excel_any(default_path)
+
 if df is None:
     st.error("엑셀에서 월별 평균기온을 찾지 못했어. 형식: A) [연도|1..12] 또는 B) [날짜|평균기온].")
     st.stop()
@@ -172,10 +159,10 @@ if df is None:
 years = sorted(df["year"].unique())
 min_year, max_year = int(min(years)), int(max(years))
 
-# ========== 탭 ==========
-tab1, tab2 = st.tabs(["단일연도", "백테스트 요약(균형 비교)"])
+# --------------------- 탭 ---------------------
+tab1, tab2 = st.tabs(["단일연도", "백테스트 요약(최적 L 중심)"])
 
-# ========== 탭1: 단일연도 ==========
+# --------------------- 탭1: 단일연도 ---------------------
 with tab1:
     c1, c2 = st.columns([1,1])
     with c1:
@@ -217,7 +204,7 @@ with tab1:
         tidy_layout(fig, title="R² 곡선 — 직전 L년 평균(1~10)", height=520)
         st.plotly_chart(fig, use_container_width=True)
 
-# ========== 탭2: 백테스트(균형 비교) ==========
+# --------------------- 탭2: 최적 L 중심 요약 ---------------------
 with tab2:
     colA, colB, colC = st.columns([1,1,1.1])
     with colA:
@@ -225,21 +212,15 @@ with tab2:
     with colB:
         y_to   = st.number_input("목표연도 종료", min_value=y_from, max_value=max_year, value=max_year)
     with colC:
-        show_heat = st.checkbox("Heatmap(Y×L) 보기(고급)", value=False)
+        show_full_heat = st.checkbox("세부 R² Heatmap(Y×L) 보기(고급)", value=False)
 
-    colD, colE = st.columns([1,1])
+    colD = st.columns(1)[0]
     with colD:
         heating_mode_bt = st.selectbox(
             "평가 월 구간(백테스트)",
             options=[("all","전월(1–12월)"),("11-3","난방월(11–3월)"),("10-3","난방확장(10–3월)")],
             index=0, format_func=lambda x: x[1]
         )[0]
-    with colE:
-        add_long_8_10 = st.checkbox("장기 확장(8–10년 포함)", value=False)
-
-    # 균형 비교 안내(난방월 선택시)
-    if heating_mode_bt == "11-3":
-        st.warning("난방월(11–3월)은 장기 창이 유리해질 수 있어. 본 비교는 ‘후보 수 동일(3 vs 3)’로 편향을 최소화했어.", icon="⚠️")
 
     # (Y, L) R² 매트릭스
     mat_rows=[]
@@ -254,134 +235,107 @@ with tab2:
             mat_rows.append((Y, L, r2(y_true_Y, y_pred)))
     mat = pd.DataFrame(mat_rows, columns=["Y","L","R2"])
 
-    # ===== 균형 비교(후보 수 동일) =====
-    recent_set = [1,2,3]
-    long_set   = [5,6,7] if not add_long_8_10 else [5,6,7,8,9,10]
-    recent_mean_by_Y = mat[mat["L"].isin(recent_set)].groupby("Y")["R2"].mean()
-    long_mean_by_Y   = mat[mat["L"].isin(long_set)].groupby("Y")["R2"].mean()
+    # 최적 L 산출
+    best_per_Y = mat.loc[mat.groupby("Y")["R2"].idxmax()][["Y","L","R2"]].dropna().sort_values("Y")
+    if best_per_Y.empty:
+        st.warning("해당 범위에서 계산 가능한 최적 L이 없음.", icon="⚠️")
+        st.stop()
 
-    comp = pd.concat([recent_mean_by_Y.rename("R2_recent_mean"),
-                      long_mean_by_Y.rename("R2_long_mean")], axis=1).dropna().reset_index()
-    comp["Δ"] = comp["R2_recent_mean"] - comp["R2_long_mean"]
-    win_rate = (comp["Δ"] >= 0).mean() if not comp.empty else np.nan
+    # 구분 레이블(최근/중간/장기)
+    best_per_Y["구분"] = np.where(best_per_Y["L"]<=3, "최근(1–3년)",
+                           np.where(best_per_Y["L"]==4, "중간(4년)", "장기(5년+)"))
 
-    avg_recent = comp["R2_recent_mean"].mean() if not comp.empty else np.nan
-    avg_long   = comp["R2_long_mean"].mean()   if not comp.empty else np.nan
-    diff_avg   = (avg_recent - avg_long) if (pd.notna(avg_recent) and pd.notna(avg_long)) else np.nan
-    mean_delta, lo, hi = (np.nan, np.nan, np.nan)
-    if not comp.empty:
-        mean_delta, lo, hi = bootstrap_ci(comp["Δ"].to_list(), B=4000, alpha=0.05)
+    # 도넛 + KPI
+    dist = (best_per_Y["구분"].value_counts()
+            .reindex(["최근(1–3년)","중간(4년)","장기(5년+)"])
+            .fillna(0).reset_index())
+    dist.columns = ["구분","연도수"]
+    pie = px.pie(dist, names="구분", values="연도수", hole=0.35,
+                 color="구분",
+                 color_discrete_map={"최근(1–3년)":"#1976D2","중간(4년)":"#E53935","장기(5년+)":"#64B5F6"})
+    pie.update_traces(textposition="inside", texttemplate="%{percent:.1%}\n(%{value}개 연도)")
+    tidy_layout(pie, title="연도별 최적 L 분포(퍼센트 + 연도수)", height=360)
+    st.plotly_chart(pie, use_container_width=True)
 
-    mode_text = {"all":"전월","11-3":"난방월","10-3":"난방확장"}[heating_mode_bt]
-    long_label = "5–7년" if not add_long_8_10 else "5–10년"
-    st.markdown(
-        f"**요약({mode_text} · {int(y_from)}–{int(y_to)} · 균형 비교: 최근1–3 vs 장기{long_label}):** "
-        f"최근 1–3년 **평균**이 장기 **평균**보다 우수한 연도 비율 = **{(win_rate*100):.1f}%**  |  "
-        f"평균 R²: 최근 **{avg_recent:.4f}**, 장기 **{avg_long:.4f}** (Δ={diff_avg:+.4f})  |  "
-        f"ΔR² 95% CI **[{lo:+.4f}, {hi:+.4f}]**"
-    )
+    total_years = int(dist["연도수"].sum())
+    def pct(v): return 0 if total_years==0 else v/total_years*100.0
+    recent_cnt = int(dist.loc[dist["구분"]=="최근(1–3년)", "연도수"].fillna(0).values[0])
+    mid_cnt    = int(dist.loc[dist["구분"]=="중간(4년)",   "연도수"].fillna(0).values[0])
+    long_cnt   = int(dist.loc[dist["구분"]=="장기(5년+)",  "연도수"].fillna(0).values[0])
 
-    # 평균 R² 막대
-    bar = pd.DataFrame({"그룹":[f"최근 1–3년(평균)", f"장기 {long_label}(평균)"], "평균 R²":[avg_recent, avg_long]})
-    fig_bar = px.bar(bar, x="그룹", y="평균 R²", text="평균 R²", color="그룹",
-                     color_discrete_map={f"최근 1–3년(평균)":"#1976D2", f"장기 {long_label}(평균)":"#64B5F6"})
-    fig_bar.update_traces(texttemplate="%{text:.4f}", textposition="outside")
-    ymin_bar = max(0.0, min(avg_recent if pd.notna(avg_recent) else 1.0,
-                            avg_long if pd.notna(avg_long) else 1.0) - 0.02)
-    tidy_layout(fig_bar, title="평균 R² 비교 — 균형 비교(후보 수 동일)")
-    fig_bar.update_yaxes(range=[ymin_bar, 1.0])
-    st.plotly_chart(fig_bar, use_container_width=True)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("최근(1–3년) 최적 연도비중", f"{recent_cnt}개 연도", f"{pct(recent_cnt):.1f}%")
+    c2.metric("중간(4년) 최적 연도비중",   f"{mid_cnt}개 연도",    f"{pct(mid_cnt):.1f}%")
+    c3.metric("장기(5년+) 최적 연도비중",  f"{long_cnt}개 연도",   f"{pct(long_cnt):.1f}%")
 
-    # 연도별 표
-    if not comp.empty:
-        disp = comp[["Y","R2_recent_mean","R2_long_mean","Δ"]].copy()
-        disp.rename(columns={"Y":"목표연도","R2_recent_mean":"최근 평균 R²","R2_long_mean":f"장기 평균 R²({long_label})","Δ":"ΔR²(최근-장기)"}, inplace=True)
-        disp["최근 평균 R²"] = disp["최근 평균 R²"].map(lambda x: f"{x:.4f}")
-        disp[f"장기 평균 R²({long_label})"] = disp[f"장기 평균 R²({long_label})"].map(lambda x: f"{x:.4f}")
-        disp["ΔR²(최근-장기)"] = disp["ΔR²(최근-장기)"].map(lambda x: f"{x:+.4f}")
-        st.dataframe(disp, use_container_width=True)
+    # 연도별 최적 L '추이' 선그래프(복원)
+    fig_bestL = go.Figure()
+    fig_bestL.add_hrect(y0=0.5, y1=3.5, fillcolor="#E3F2FD", opacity=0.35, line_width=0)  # 최근
+    fig_bestL.add_hrect(y0=3.5, y1=4.5, fillcolor="#FFEBEE", opacity=0.35, line_width=0)  # 중간
+    fig_bestL.add_hrect(y0=4.5, y1=10.5, fillcolor="#E8F5E9", opacity=0.25, line_width=0) # 장기
+    fig_bestL.add_trace(go.Scatter(
+        x=best_per_Y["Y"], y=best_per_Y["L"],
+        mode="lines+markers+text",
+        text=[str(int(v)) for v in best_per_Y["L"]],
+        textposition="top center",
+        name="최적 L"
+    ))
+    fig_bestL.add_hline(y=3, line_dash="dot", line_color="#888")
+    fig_bestL.update_yaxes(title="최적 L(년)", dtick=1, range=[1,10.1])
+    fig_bestL.update_xaxes(title="목표연도 Y")
+    tidy_layout(fig_bestL, title="연도별 최적 L 추이(낮을수록 최근 중심)")
+    st.plotly_chart(fig_bestL, use_container_width=True)
 
-    # ===== 최적 L 분포(도넛) + KPI + '최근 최적 연도' 시각화 =====
-    best_per_Y = mat.loc[mat.groupby("Y")["R2"].idxmax()][["Y","L"]].dropna().sort_values("Y")
-    if not best_per_Y.empty:
-        tmp = best_per_Y.copy()
-        tmp["구분"] = np.where(tmp["L"]<=3, "최근(1–3년)",
-                         np.where(tmp["L"]==4, "중간(4년)", "장기(5년+)"))
-        dist = tmp["구분"].value_counts().reindex(["최근(1–3년)","중간(4년)","장기(5년+)"]).fillna(0).reset_index()
-        dist.columns = ["구분","연도수"]
-
-        # 도넛
-        pie = px.pie(dist, names="구분", values="연도수", hole=0.35,
-                     color="구분",
-                     color_discrete_map={"최근(1–3년)":"#1976D2","중간(4년)":"#E53935","장기(5년+)":"#64B5F6"})
-        pie.update_traces(textposition="inside", texttemplate="%{percent:.1%}\n(%{value}개 연도)")
-        tidy_layout(pie, title="연도별 최적 L 분포(퍼센트 + 연도수)", height=360)
-        st.plotly_chart(pie, use_container_width=True)
-
-        # KPI
-        total_years = dist["연도수"].sum()
-        def pct(v): return 0 if total_years==0 else v/total_years*100.0
-        recent_cnt = int(dist.loc[dist["구분"]=="최근(1–3년)", "연도수"].fillna(0).values[0])
-        mid_cnt    = int(dist.loc[dist["구분"]=="중간(4년)",   "연도수"].fillna(0).values[0])
-        long_cnt   = int(dist.loc[dist["구분"]=="장기(5년+)",  "연도수"].fillna(0).values[0])
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("최근(1–3년) 최적 연도비중", f"{recent_cnt}개 연도", f"{pct(recent_cnt):.1f}%")
-        c2.metric("중간(4년) 최적 연도비중",   f"{mid_cnt}개 연도",    f"{pct(mid_cnt):.1f}%")
-        c3.metric("장기(5년+) 최적 연도비중",  f"{long_cnt}개 연도",   f"{pct(long_cnt):.1f}%")
-
-        # (A) 연도별 최적 L '추이' — 이전 버전 그래프 복원
-        fig_bestL = go.Figure()
-        fig_bestL.add_hrect(y0=0.5, y1=3.5, fillcolor="#E3F2FD", opacity=0.35, line_width=0)  # 최근 영역
-        fig_bestL.add_hrect(y0=3.5, y1=4.5, fillcolor="#FFEBEE", opacity=0.35, line_width=0)  # 중간 영역
-        fig_bestL.add_hrect(y0=4.5, y1=10.5, fillcolor="#E8F5E9", opacity=0.25, line_width=0) # 장기 영역
-        fig_bestL.add_trace(go.Scatter(
-            x=best_per_Y["Y"], y=best_per_Y["L"],
-            mode="lines+markers+text",
-            text=[str(int(v)) for v in best_per_Y["L"]],
+    # '최근(1–3년) 최적' 연도 리스트 + 점 시각화
+    recent_years = best_per_Y.loc[best_per_Y["구분"]=="최근(1–3년)", "Y"].astype(int).tolist()
+    if recent_years:
+        st.info("최근(1–3년) 최적 연도: **" + ", ".join(map(str, recent_years)) + "**", icon="ℹ️")
+        df_recent_vis = pd.DataFrame({"Y": recent_years, "표시값": 1})
+        fig_strip = go.Figure()
+        fig_strip.add_trace(go.Scatter(
+            x=df_recent_vis["Y"], y=df_recent_vis["표시값"],
+            mode="markers+text",
+            text=df_recent_vis["Y"].astype(str),
             textposition="top center",
-            name="최적 L"
+            marker=dict(size=12, color="#1976D2"),
+            name="최근 최적 연도"
         ))
-        fig_bestL.add_hline(y=3, line_dash="dot", line_color="#888")
-        fig_bestL.update_yaxes(title="최적 L(년)", dtick=1, range=[1,10.1])
-        fig_bestL.update_xaxes(title="목표연도 Y")
-        tidy_layout(fig_bestL, title="연도별 최적 L 추이(낮을수록 최근 중심)")
-        st.plotly_chart(fig_bestL, use_container_width=True)
+        fig_strip.update_yaxes(visible=False, range=[0.8, 1.2])
+        fig_strip.update_xaxes(title="최근(1–3년) 최적으로 나온 연도", tickmode="linear")
+        tidy_layout(fig_strip, title=f"최근(1–3년) 최적 ‘{len(recent_years)}개 연도’ 시각화", height=240)
+        st.plotly_chart(fig_strip, use_container_width=True)
 
-        # (B) 도넛 하단: '최근(1–3년) 최적'에 속한 연도만 모아서 별도 시각화
-        recent_years = tmp.loc[tmp["구분"]=="최근(1–3년)","Y"].astype(int).tolist()
-        recent_df = pd.DataFrame({"Y": recent_years})
-        recent_df["값"] = 1  # 표시용
+    # ▶ 표 추가: 3번째 섹션의 데이터(연도·최적L·구분·최적R²)
+    table = best_per_Y[["Y","L","구분","R2"]].rename(
+        columns={"Y":"목표연도", "L":"최적 L(년)", "R2":"최적 R²"}
+    )
+    table["최적 L(년)"] = table["최적 L(년)"].astype(int)
+    table["최적 R²"]  = table["최적 R²"].map(lambda x: f"{x:.4f}")
+    st.markdown("#### 연도별 최적 L 표(3번째 섹션 데이터)")
+    st.dataframe(table, use_container_width=True)
 
-        # 텍스트로도 바로 확인
-        if recent_years:
-            years_txt = ", ".join(map(str, recent_years))
-            st.info(f"최근(1–3년) 최적 연도: **{years_txt}**", icon="ℹ️")
+    # ▶ 히트맵 추가: ‘군집 히트맵(최근/중간/장기)’  — 연도 × 3열(해당 군집=1, 나머지=0)
+    group_order = ["최근(1–3년)","중간(4년)","장기(5년+)"]
+    grp_heat = (best_per_Y.assign(val=1)
+                .pivot(index="Y", columns="구분", values="val")
+                .reindex(columns=group_order)
+                .fillna(0)
+               )
+    fig_grp_hm = px.imshow(
+        grp_heat,
+        labels=dict(x="군집", y="목표연도 Y", color="최적 여부"),
+        aspect="auto", color_continuous_scale="Blues", origin="lower",
+        zmin=0, zmax=1
+    )
+    tidy_layout(fig_grp_hm, title="군집 히트맵 — 연도별 최적 군집(최근/중간/장기)", height=420)
+    st.plotly_chart(fig_grp_hm, use_container_width=True)
 
-            # (B-1) 스트립/막대 스타일: 해당 연도만 점으로 표시
-            fig_strip = go.Figure()
-            fig_strip.add_trace(go.Scatter(
-                x=recent_df["Y"], y=recent_df["값"],
-                mode="markers+text",
-                text=recent_df["Y"].astype(str),
-                textposition="top center",
-                marker=dict(size=12, color="#1976D2"),
-                name="최근 최적 연도"
-            ))
-            fig_strip.update_yaxes(visible=False, range=[0.8, 1.2])
-            fig_strip.update_xaxes(title="최근(1–3년) 최적으로 나온 연도", tickmode="linear")
-            tidy_layout(fig_strip, title=f"최근(1–3년) 최적 ‘{len(recent_years)}개 연도’ 시각화", height=260)
-            st.plotly_chart(fig_strip, use_container_width=True)
-
-        else:
-            st.warning("최근(1–3년) 최적으로 나온 연도가 없음.", icon="⚠️")
-
-    # Heatmap(옵션)
-    if show_heat:
+    # (고급) 세부 R² Heatmap(Y×L)
+    if show_full_heat:
         heat_df = mat.pivot(index="Y", columns="L", values="R2").sort_index()
         fig_hm = px.imshow(heat_df, labels=dict(x="L(년)", y="목표연도 Y", color="R²"),
                            aspect="auto", color_continuous_scale="Blues", origin="lower")
-        tidy_layout(fig_hm, title="R² Heatmap — Y×L", height=520)
+        tidy_layout(fig_hm, title="세부 R² Heatmap — Y×L", height=520)
         st.plotly_chart(fig_hm, use_container_width=True)
 
     st.caption(f"(시트: {used_sheet}, 모드: {mode})")
