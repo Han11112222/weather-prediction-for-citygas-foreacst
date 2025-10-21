@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# 최근 L년 평균 vs 실제 — 균형 비교(후보 수 동일) + 최적 L 추이 + 최근(1–3년) 최적 연도 + 히트맵(연도 제외 가능)
+# 최근 L년 평균 vs 실제 — 균형 비교(후보 수 동일) + 최적 L 추이 + 최근(1–3년) 최적 연도 + 히트맵(연도 제외)
 
 from pathlib import Path
 import re
@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="최근 L년 평균 vs 실제 — 균형 비교", layout="wide")
 
-# --------------------- 레이아웃 공통 ---------------------
+# --------------------- 레이아웃 ---------------------
 def tidy_layout(fig, title=None, height=360):
     if title:
         fig.update_layout(title=title, title_pad=dict(t=28, l=6, r=6, b=6))
@@ -119,22 +119,14 @@ def r2(y, yp):
     sse = np.sum((y-yp)**2); sst = np.sum((y-y.mean())**2)
     return float(1 - sse/sst) if sst>0 else np.nan
 
-def month_mask(series_month, heating_mode:str):
-    if heating_mode == "all":   return np.ones_like(series_month, dtype=bool)
-    if heating_mode == "11-3":  return series_month.isin([11,12,1,2,3])
-    if heating_mode == "10-3":  return series_month.isin([10,11,12,1,2,3])
-    return np.ones_like(series_month, dtype=bool)
-
-def build_y_true(df, Y:int, heating_mode:str):
+def build_y_true_all_months(df, Y:int):
     y_df = df.query("year == @Y").sort_values("month").copy()
-    y_df = y_df[ month_mask(y_df["month"], heating_mode) ]
     months_order = y_df["month"].tolist()
     y_true = y_df["temp"].to_numpy()
     return months_order, y_true
 
-def build_pred_from_train(df, start:int, end:int, months_order:list, heating_mode:str):
+def build_pred_from_train_all(df, start:int, end:int, months_order:list):
     train = df.query("year >= @start and year <= @end").copy()
-    train = train[ month_mask(train["month"], heating_mode) ]
     preds=[]
     for m in months_order:
         x = train.loc[train["month"]==m, "temp"].to_numpy()
@@ -162,24 +154,17 @@ tab1, tab2 = st.tabs(["단일연도", "백테스트 요약(최적 L 중심)"])
 
 # --------------------- 탭1: 단일연도 ---------------------
 with tab1:
-    c1, c2 = st.columns([1,1])
+    c1, _ = st.columns([1,1])
     with c1:
         target_year = st.number_input("대상연도(실제값 존재)", min_value=min_year+1, max_value=max_year, value=max_year)
-    with c2:
-        heating_mode = st.selectbox(
-            "평가 월 구간",
-            options=[("all","전월(1–12월)"),("11-3","난방월(11–3월)"),("10-3","난방확장(10–3월)")],
-            index=0, format_func=lambda x: x[1]
-        )[0]
-    ex_start, ex_end = target_year-3, target_year-1
-    st.caption(f"예: {target_year}년 예측에서 ‘최근 3년 평균’은 {ex_start}~{ex_end}의 월평균으로 {target_year}년을 추정한다는 뜻.")
+    st.caption(f"예: {target_year}년 예측에서 ‘최근 3년 평균’은 {target_year-3}~{target_year-1}의 월평균으로 {target_year}년을 추정한다는 뜻. (평가 월 구간: **전월 1–12월 고정**)")
 
-    months_order, y_true = build_y_true(df, target_year, heating_mode)
+    months_order, y_true = build_y_true_all_months(df, target_year)
     rows=[]
     for L in range(1, 11):
         start = target_year - L
         if start < min_year: continue
-        y_pred = build_pred_from_train(df, start, target_year-1, months_order, heating_mode)
+        y_pred = build_pred_from_train_all(df, start, target_year-1, months_order)
         rows.append((L, r2(y_true, y_pred)))
     perf = pd.DataFrame(rows, columns=["L(년)","R2"]).dropna().sort_values("L(년)")
 
@@ -210,22 +195,16 @@ with tab2:
     with colB:
         y_to   = st.number_input("목표연도 종료", min_value=y_from, max_value=max_year, value=max_year)
 
-    heating_mode_bt = st.selectbox(
-        "평가 월 구간(백테스트)",
-        options=[("all","전월(1–12월)"),("11-3","난방월(11–3월)"),("10-3","난방확장(10–3월)")],
-        index=0, format_func=lambda x: x[1]
-    )[0]
-
-    # (Y, L) R² 매트릭스
+    # (Y, L) R² 매트릭스 (전월 1–12월 고정)
     mat_rows=[]
     for Y in range(int(y_from), int(y_to)+1):
-        months_order_Y, y_true_Y = build_y_true(df, Y, heating_mode_bt)
+        months_order_Y, y_true_Y = build_y_true_all_months(df, Y)
         endY = Y-1
         for L in range(1, 11):
             start = Y - L
             if start < min_year:
                 mat_rows.append((Y, L, np.nan)); continue
-            y_pred = build_pred_from_train(df, start, endY, months_order_Y, heating_mode_bt)
+            y_pred = build_pred_from_train_all(df, start, endY, months_order_Y)
             mat_rows.append((Y, L, r2(y_true_Y, y_pred)))
     mat = pd.DataFrame(mat_rows, columns=["Y","L","R2"])
 
@@ -275,7 +254,7 @@ with tab2:
     tidy_layout(fig_bestL, title="연도별 최적 L 추이(낮을수록 최근 중심)")
     st.plotly_chart(fig_bestL, use_container_width=True)
 
-    # ------- 최근(1–3년) 최적 연도 표시 -------
+    # ------- 최근(1–3년) 최적 연도 시각화 -------
     recent_years = best_per_Y.loc[best_per_Y["구분"]=="최근(1–3년)", "Y"].astype(int).tolist()
     if recent_years:
         st.info("최근(1–3년) 최적 연도: **" + ", ".join(map(str, recent_years)) + "**", icon="ℹ️")
@@ -294,7 +273,7 @@ with tab2:
         tidy_layout(fig_strip, title=f"최근(1–3년) 최적 ‘{len(recent_years)}개 연도’ 시각화", height=240)
         st.plotly_chart(fig_strip, use_container_width=True)
 
-    # ------- (선택) 군집 히트맵 보기 토글 -------
+    # ------- (선택) 군집 히트맵 -------
     show_group_heat = st.checkbox("군집 히트맵(최근/중간/장기) 보기", value=False)
     if show_group_heat:
         group_order = ["최근(1–3년)","중간(4년)","장기(5년+)"]
@@ -312,7 +291,7 @@ with tab2:
         st.plotly_chart(fig_grp_hm, use_container_width=True)
 
     # ------- 세부 R² Heatmap — Y×L (연도 제외 멀티셀렉트) -------
-    st.markdown("#### 세부 R² Heatmap — Y×L")
+    st.markdown("#### 세부 R² Heatmap — Y×L  *(평가 월 구간: 전월 1–12월 고정)*")
     all_years_for_heat = sorted(mat["Y"].unique())
     exclude_years = st.multiselect(
         "히트맵에서 제외할 연도 선택",
