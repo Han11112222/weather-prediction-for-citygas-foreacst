@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 # 최근 L년(1~10) 평균으로 목표연도 월별 기온을 예측했을 때의 적합도(R²) 비교 앱
 # 탭 1) 단일연도: R² 곡선 + 최적 L 음영 + L=3 별표 + 설명문구
-# 탭 2) 백테스트 요약: 목표연도 범위 × L=1..10 Heatmap(옵션)
-#     + 승률/평균R²/ΔR²(부트스트랩 95% CI) + 최적L 분포(파이) + 최적L 추이(라인)
-#
-# 입력 엑셀: Wide([연도|1..12]) 또는 Long([날짜|평균기온]) 자동 인식
+# 탭 2) 백테스트 요약: 목표연도 범위 × L=1..10 Heatmap(옵션, 기본 ON)
+#     + 승률/평균R²/ΔR²(부트스트랩 CI) + 최적L 분포(파이) + 최적L 추이(라인)
 
 from pathlib import Path
 import re
@@ -73,7 +71,7 @@ def try_parse_long(df_raw: pd.DataFrame):
         if date_col is None:
             for c in body.columns:
                 s = pd.to_datetime(body[c], errors="coerce")
-                if s.notna().sum() >= max(12, int(len(s)*0.3)):
+                if s.notna().sum() >= max(12, int(len(s)*0.3)) :
                     date_col = c; break
         if date_col is None: continue
         val_col = None
@@ -236,7 +234,7 @@ with tab2:
     with colB:
         y_to   = st.number_input("목표연도 종료", min_value=y_from, max_value=max_year, value=max_year)
     with colC:
-        show_heat = st.checkbox("Heatmap(Y×L) 보기", value=True)
+        show_heat = st.checkbox("Heatmap(Y×L) 보기", value=True)  # ← 기본 ON
 
     colD, _ = st.columns([1,2])
     with colD:
@@ -309,7 +307,6 @@ with tab2:
     # 최적 L 분포(파이) + 최적 L 추이(라인)
     best_per_Y = mat.loc[mat.groupby("Y")["R2"].idxmax()][["Y","L"]].dropna().sort_values("Y")
     if not best_per_Y.empty:
-        # 분포(파이)
         tmp = best_per_Y.copy()
         tmp["구분"] = np.where(tmp["L"]<=3, "최근(1–3년)",
                          np.where(tmp["L"]>=5, "장기(5년+)", "중간(4년)"))
@@ -319,7 +316,6 @@ with tab2:
         pie.update_layout(height=320, margin=dict(l=10,r=10,t=10,b=10))
         st.plotly_chart(pie, use_container_width=True)
 
-        # 추이(라인)
         fig_bestL = go.Figure()
         fig_bestL.add_trace(go.Scatter(
             x=best_per_Y["Y"], y=best_per_Y["L"],
@@ -335,12 +331,12 @@ with tab2:
                                 title="연도별 최적 L 추이(낮을수록 최근 연도 중심)")
         st.plotly_chart(fig_bestL, use_container_width=True)
 
-    # Heatmap (옵션)
+    # Heatmap (옵션, 기본 ON)
     if show_heat:
         heat_df = mat.pivot(index="Y", columns="L", values="R2").sort_index()
         fig_hm = px.imshow(heat_df, labels=dict(x="L(년)", y="목표연도 Y", color="R²"),
                            aspect="auto", color_continuous_scale="Blues", origin="lower")
-        fig_hm.update_layout(height=520, margin=dict(l=10,r=10,t=10,b=10))
+        fig_hm.update_layout(height=520, margin=dict(l=10,r=10,t=10,b=10), title="R² Heatmap — Y×L")
         st.plotly_chart(fig_hm, use_container_width=True)
 
     st.caption(f"(시트: {used_sheet}, 모드: {mode})")
