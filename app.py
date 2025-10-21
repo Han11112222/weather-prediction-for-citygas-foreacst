@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-# 최근 L년 평균 vs 실제 — 균형 비교(후보 수 동일) 중심
-# 3번째 섹션(도넛+최적L추이+최근최적연도 시각화)을 유지하고,
-# 그 데이터의 표와 '군집 히트맵(최근/중간/장기)'을 추가.
+# 최근 L년 평균 vs 실제 — 균형 비교(후보 수 동일) + 최적 L 추이 + 최근(1–3년) 최적 연도 + 히트맵(연도 제외 가능)
 
 from pathlib import Path
 import re
@@ -206,21 +204,17 @@ with tab1:
 
 # --------------------- 탭2: 최적 L 중심 요약 ---------------------
 with tab2:
-    colA, colB, colC = st.columns([1,1,1.1])
+    colA, colB = st.columns([1,1])
     with colA:
         y_from = st.number_input("목표연도 시작", min_value=min_year+1, max_value=max_year-1, value=max(min_year+5, max_year-10))
     with colB:
         y_to   = st.number_input("목표연도 종료", min_value=y_from, max_value=max_year, value=max_year)
-    with colC:
-        show_full_heat = st.checkbox("세부 R² Heatmap(Y×L) 보기(고급)", value=False)
 
-    colD = st.columns(1)[0]
-    with colD:
-        heating_mode_bt = st.selectbox(
-            "평가 월 구간(백테스트)",
-            options=[("all","전월(1–12월)"),("11-3","난방월(11–3월)"),("10-3","난방확장(10–3월)")],
-            index=0, format_func=lambda x: x[1]
-        )[0]
+    heating_mode_bt = st.selectbox(
+        "평가 월 구간(백테스트)",
+        options=[("all","전월(1–12월)"),("11-3","난방월(11–3월)"),("10-3","난방확장(10–3월)")],
+        index=0, format_func=lambda x: x[1]
+    )[0]
 
     # (Y, L) R² 매트릭스
     mat_rows=[]
@@ -237,15 +231,10 @@ with tab2:
 
     # 최적 L 산출
     best_per_Y = mat.loc[mat.groupby("Y")["R2"].idxmax()][["Y","L","R2"]].dropna().sort_values("Y")
-    if best_per_Y.empty:
-        st.warning("해당 범위에서 계산 가능한 최적 L이 없음.", icon="⚠️")
-        st.stop()
-
-    # 구분 레이블(최근/중간/장기)
     best_per_Y["구분"] = np.where(best_per_Y["L"]<=3, "최근(1–3년)",
                            np.where(best_per_Y["L"]==4, "중간(4년)", "장기(5년+)"))
 
-    # 도넛 + KPI
+    # ------- 도넛 + KPI -------
     dist = (best_per_Y["구분"].value_counts()
             .reindex(["최근(1–3년)","중간(4년)","장기(5년+)"])
             .fillna(0).reset_index())
@@ -268,7 +257,7 @@ with tab2:
     c2.metric("중간(4년) 최적 연도비중",   f"{mid_cnt}개 연도",    f"{pct(mid_cnt):.1f}%")
     c3.metric("장기(5년+) 최적 연도비중",  f"{long_cnt}개 연도",   f"{pct(long_cnt):.1f}%")
 
-    # 연도별 최적 L '추이' 선그래프(복원)
+    # ------- 연도별 최적 L 추이 -------
     fig_bestL = go.Figure()
     fig_bestL.add_hrect(y0=0.5, y1=3.5, fillcolor="#E3F2FD", opacity=0.35, line_width=0)  # 최근
     fig_bestL.add_hrect(y0=3.5, y1=4.5, fillcolor="#FFEBEE", opacity=0.35, line_width=0)  # 중간
@@ -286,7 +275,7 @@ with tab2:
     tidy_layout(fig_bestL, title="연도별 최적 L 추이(낮을수록 최근 중심)")
     st.plotly_chart(fig_bestL, use_container_width=True)
 
-    # '최근(1–3년) 최적' 연도 리스트 + 점 시각화
+    # ------- 최근(1–3년) 최적 연도 표시 -------
     recent_years = best_per_Y.loc[best_per_Y["구분"]=="최근(1–3년)", "Y"].astype(int).tolist()
     if recent_years:
         st.info("최근(1–3년) 최적 연도: **" + ", ".join(map(str, recent_years)) + "**", icon="ℹ️")
@@ -305,35 +294,37 @@ with tab2:
         tidy_layout(fig_strip, title=f"최근(1–3년) 최적 ‘{len(recent_years)}개 연도’ 시각화", height=240)
         st.plotly_chart(fig_strip, use_container_width=True)
 
-    # ▶ 표 추가: 3번째 섹션의 데이터(연도·최적L·구분·최적R²)
-    table = best_per_Y[["Y","L","구분","R2"]].rename(
-        columns={"Y":"목표연도", "L":"최적 L(년)", "R2":"최적 R²"}
-    )
-    table["최적 L(년)"] = table["최적 L(년)"].astype(int)
-    table["최적 R²"]  = table["최적 R²"].map(lambda x: f"{x:.4f}")
-    st.markdown("#### 연도별 최적 L 표(3번째 섹션 데이터)")
-    st.dataframe(table, use_container_width=True)
+    # ------- (선택) 군집 히트맵 보기 토글 -------
+    show_group_heat = st.checkbox("군집 히트맵(최근/중간/장기) 보기", value=False)
+    if show_group_heat:
+        group_order = ["최근(1–3년)","중간(4년)","장기(5년+)"]
+        grp_heat = (best_per_Y.assign(val=1)
+                    .pivot(index="Y", columns="구분", values="val")
+                    .reindex(columns=group_order)
+                    .fillna(0))
+        fig_grp_hm = px.imshow(
+            grp_heat,
+            labels=dict(x="군집", y="목표연도 Y", color="최적 여부"),
+            aspect="auto", color_continuous_scale="Blues", origin="lower",
+            zmin=0, zmax=1
+        )
+        tidy_layout(fig_grp_hm, title="군집 히트맵 — 연도별 최적 군집(최근/중간/장기)", height=420)
+        st.plotly_chart(fig_grp_hm, use_container_width=True)
 
-    # ▶ 히트맵 추가: ‘군집 히트맵(최근/중간/장기)’  — 연도 × 3열(해당 군집=1, 나머지=0)
-    group_order = ["최근(1–3년)","중간(4년)","장기(5년+)"]
-    grp_heat = (best_per_Y.assign(val=1)
-                .pivot(index="Y", columns="구분", values="val")
-                .reindex(columns=group_order)
-                .fillna(0)
-               )
-    fig_grp_hm = px.imshow(
-        grp_heat,
-        labels=dict(x="군집", y="목표연도 Y", color="최적 여부"),
-        aspect="auto", color_continuous_scale="Blues", origin="lower",
-        zmin=0, zmax=1
+    # ------- 세부 R² Heatmap — Y×L (연도 제외 멀티셀렉트) -------
+    st.markdown("#### 세부 R² Heatmap — Y×L")
+    all_years_for_heat = sorted(mat["Y"].unique())
+    exclude_years = st.multiselect(
+        "히트맵에서 제외할 연도 선택",
+        options=all_years_for_heat,
+        default=[], help="예: 2021, 2022 선택 시 해당 연도는 히트맵에서 숨김"
     )
-    tidy_layout(fig_grp_hm, title="군집 히트맵 — 연도별 최적 군집(최근/중간/장기)", height=420)
-    st.plotly_chart(fig_grp_hm, use_container_width=True)
-
-    # (고급) 세부 R² Heatmap(Y×L)
-    if show_full_heat:
-        heat_df = mat.pivot(index="Y", columns="L", values="R2").sort_index()
-        fig_hm = px.imshow(heat_df, labels=dict(x="L(년)", y="목표연도 Y", color="R²"),
+    heat_source = mat[~mat["Y"].isin(exclude_years)].copy()
+    if heat_source["Y"].nunique() == 0:
+        st.warning("모든 연도를 제외했습니다. 연도를 일부만 선택 해제하세요.", icon="⚠️")
+    else:
+        heat_df = heat_source.pivot(index="Y", columns="L", values="R2").sort_index()
+        fig_hm = px.imshow(heat_df, labels=dict(x="L(년)", y="Y(목표연도)", color="R²"),
                            aspect="auto", color_continuous_scale="Blues", origin="lower")
         tidy_layout(fig_hm, title="세부 R² Heatmap — Y×L", height=520)
         st.plotly_chart(fig_hm, use_container_width=True)
