@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 # 추천 학습 데이터 기간 — 기온(대구) · R² 곡선/Top3 표
-# - 다중 시트 지원
-# - 헤더 자동탐지(최대 5행 스캔)
-# - 월명 인식(숫자/한글/영문 Jan..Dec)
-# - 이상저온 하위 p% 컷 제외 평균
+# 입력 엑셀 포맷 자동 인식:
+#  A) Wide형: [연도 | 1월 | ... | 12월]
+#  B) Long형: [날짜(datetime) | 평균기온(혹은 임의 이름의 수치열)]
+#     - 날짜에서 연/월 추출 → (year, month) 집계
+#     - 여러 수치열이 있으면 '평균기온' 이름을 우선, 없으면 첫 번째 수치열 사용
 
 from pathlib import Path
 import re
@@ -33,82 +34,121 @@ MONTH_ALIASES = {
 }
 
 def norm_month(col) -> int|None:
-    """컬럼명을 월 번호로 표준화."""
     s = str(col).strip().lower()
     s = s.replace(" ", "")
-    s = s.replace("month", "") # '1month' 같은 변형 방지
+    s = s.replace("month", "")
     s = s.replace("월평균", "").replace("평균", "")
-    s = s.replace("월", "") if re.fullmatch(r"\d+\s*월", str(col)) else s
+    if re.fullmatch(r"\d+\s*월", str(col)):
+        s = str(col).strip().lower().replace(" ", "").replace("월","")
     return MONTH_ALIASES.get(s, None)
 
-def try_parse_sheet(df_raw: pd.DataFrame):
-    """
-    헤더 자동탐지: 0~4행을 헤더 후보로 읽어 월 컬럼을 6개 이상 찾으면 채택.
-    첫 컬럼은 '연도/년도/구분/year' 등으로 인식.
-    """
+# -------------------------------
+# 파서: Wide형 시도
+# -------------------------------
+def try_parse_wide(df_raw: pd.DataFrame):
+    # 헤더 위치 0~4행 스캔
     for header_row in range(0, min(5, len(df_raw))):
-        # 해당 행을 헤더로 재설정
         hdr = list(df_raw.iloc[header_row])
         body = df_raw.iloc[header_row+1:].copy()
         body.columns = hdr
 
-        # 첫 열 후보
-        first_col_name = str(body.columns[0]).strip().lower()
-        if first_col_name in ["연도","년도","구분","year","years"]:
-            body = body.rename(columns={body.columns[0]: "year"})
-        else:
-            # 그래도 'year'로 고정
-            body = body.rename(columns={body.columns[0]: "year"})
+        # 첫 열명 표준화
+        first = str(body.columns[0]).strip().lower()
+        body = body.rename(columns={body.columns[0]: "year"})
 
-        # 월 컬럼 수집
+        # 월 컬럼 찾기
         month_map = {}
         for c in body.columns[1:]:
             m = norm_month(c)
             if m is not None and 1 <= m <= 12:
                 month_map[c] = m
-
-        # 월 컬럼이 충분하면 성공
         if len(month_map) >= 6:
-            # 필요 컬럼만
             use_cols = ["year"] + list(month_map.keys())
             body = body[use_cols].copy()
             body = body.rename(columns=month_map)
-
-            # year 정수화
             body["year"] = pd.to_numeric(body["year"], errors="coerce")
             body = body.dropna(subset=["year"])
             body["year"] = body["year"].astype(int)
-
-            # wide→long
             long = body.melt(id_vars="year", var_name="month", value_name="temp")
             long["month"] = long["month"].astype(int)
-            long["temp"] = pd.to_numeric(long["temp"], errors="coerce")
-            long = long.dropna(subset=["temp"])
-            long = long.sort_values(["year","month"], ignore_index=True)
-
-            # 연도/데이터 존재 검사
-            years = sorted(long["year"].unique().tolist())
-            if len(years) >= 3:
+            long["temp"]  = pd.to_numeric(long["temp"], errors="coerce")
+            long = long.dropna(subset=["temp"]).sort_values(["year","month"], ignore_index=True)
+            if long["year"].nunique() >= 3:
                 return long
+    return None
 
-    return None  # 실패
+# -------------------------------
+# 파서: Long형 시도
+# -------------------------------
+def try_parse_long(df_raw: pd.DataFrame):
+    # 헤더 0~4행 탐색
+    for header_row in range(0, min(5, len(df_raw))):
+        hdr = list(df_raw.iloc[header_row])
+        body = df_raw.iloc[header_row+1:].copy()
+        body.columns = hdr
+
+        # 날짜 열 찾기
+        date_col = None
+        for c in body.columns:
+            name = str(c).strip().lower()
+            if name in ["날짜","date","일자","일시","yyyymmdd","dt"]:
+                date_col = c
+                break
+        # 날짜열 못 찾았으면 "datetime형으로 변환 성공하는 첫 열" 시도
+        if date_col is None:
+            for c in body.columns:
+                s = pd.to_datetime(body[c], errors="coerce")
+                if s.notna().sum() >= max(10, int(len(s)*0.2)):
+                    date_col = c
+                    break
+        if date_col is None:
+            continue
+
+        # 수치 열 후보: '평균기온' 우선, 없으면 첫 번째 수치열
+        value_col = None
+        for c in body.columns:
+            if str(c).strip() in ["평균기온","기온","temp","temperature"]:
+                value_col = c
+                break
+        if value_col is None:
+            numeric_cols = [c for c in body.columns if pd.to_numeric(body[c], errors="coerce").notna().sum()>=max(10, int(len(body)*0.2))]
+            # 날짜열 제외
+            numeric_cols = [c for c in numeric_cols if c != date_col]
+            if numeric_cols:
+                value_col = numeric_cols[0]
+        if value_col is None:
+            continue
+
+        # 정규화
+        body = body[[date_col, value_col]].copy()
+        body.rename(columns={date_col:"date", value_col:"temp"}, inplace=True)
+        body["date"] = pd.to_datetime(body["date"], errors="coerce")
+        body["temp"] = pd.to_numeric(body["temp"], errors="coerce")
+        body = body.dropna(subset=["date","temp"])
+        # 연/월 파생
+        body["year"]  = body["date"].dt.year
+        body["month"] = body["date"].dt.month
+
+        # 월평균(연,월)
+        long = (body.groupby(["year","month"], as_index=False)["temp"]
+                     .mean().sort_values(["year","month"], ignore_index=True))
+        if long["year"].nunique() >= 3:
+            return long
+    return None
 
 @st.cache_data
-def load_excel_any(path_or_buffer, sheet_name=None):
-    """
-    - sheet_name=None이면 첫 시트 시도 + 자동탐지
-    - 실패 시 모든 시트 순회
-    """
+def load_excel_any(path_or_buffer):
     xls = pd.ExcelFile(path_or_buffer)
-    sheet_candidates = [sheet_name] if sheet_name else xls.sheet_names
-
-    for sh in sheet_candidates:
+    # 모든 시트 순회: Wide → Long 순으로 시도
+    for sh in xls.sheet_names:
         raw = pd.read_excel(xls, sheet_name=sh, header=None)
-        parsed = try_parse_sheet(raw)
+        parsed = try_parse_wide(raw)
         if parsed is not None:
-            return parsed, sh
-
-    return None, None
+            return parsed, sh, "wide"
+        parsed = try_parse_long(raw)
+        if parsed is not None:
+            return parsed, sh, "long"
+    return None, None, None
 
 # -------------------------------
 # 입력: 업로더 + 기본 파일
@@ -116,16 +156,15 @@ def load_excel_any(path_or_buffer, sheet_name=None):
 default_path = Path("기온예측.xlsx")
 uploaded = st.file_uploader("월별 평균기온 파일 업로드 (.xlsx)", type=["xlsx"])
 
-df, used_sheet = None, None
+df, used_sheet, mode = None, None, None
 if uploaded:
-    df, used_sheet = load_excel_any(uploaded)
+    df, used_sheet, mode = load_excel_any(uploaded)
 elif default_path.exists():
-    df, used_sheet = load_excel_any(default_path)
+    df, used_sheet, mode = load_excel_any(default_path)
 
 if df is None:
-    st.error("엑셀에서 연/월 구조를 찾지 못했어. 헤더가 2~3행 아래 있거나, 시트가 여러 개인지 확인해줘.\n"
-             "열 예시: [연도 | 1월 | 2월 | ... | 12월] 또는 [year | Jan | Feb | ... | Dec]\n"
-             "그래도 안되면 샘플을 보내줘.")
+    st.error("엑셀에서 월별 평균기온을 찾지 못했어.\n"
+             "지원 포맷 A) [연도 | 1월..12월], B) [날짜 | 평균기온] 중 하나로 맞춰줘.")
     st.stop()
 
 years = sorted(df["year"].unique().tolist())
@@ -140,15 +179,15 @@ with colA:
                                   max_value=max_year, value=max_year, step=1)
 with colB:
     lower_tail = st.slider("이상저온 컷(하위 p%)", 0, 20, 10, 1,
-                           help="해당 월의 분포에서 하위 p% 값 제외(한파 등 이례치 배제)")
+                           help="월 분포의 하위 p% 값 제외(한파 등 이례치 배제)")
 with colC:
     metric_for_top = st.selectbox("Top3 정렬지표", ["R²(높을수록)", "MAE(낮을수록)"], index=0)
 with colD:
     note = st.text_input("그래프 상단 제목(옵션)",
-                         value=f"추천 학습 데이터 기간 — 운영상 최근평년(시트: {used_sheet})")
+                         value=f"추천 학습 데이터 기간 — 최근평년(시트:{used_sheet}, 모드:{mode})")
 
 # -------------------------------
-# 유틸: 예측/지표
+# 유틸
 # -------------------------------
 def monthwise_recent_mean(train_slice: pd.DataFrame, p_tail: int) -> pd.Series:
     preds = {}
@@ -158,7 +197,7 @@ def monthwise_recent_mean(train_slice: pd.DataFrame, p_tail: int) -> pd.Series:
             preds[m] = np.nan
             continue
         if p_tail > 0 and x.size >= 10:
-            q = np.percentile(x, p_tail)
+            q = np.percentile(x, p_tail)  # 하위 p%
             x = x[x > q]
         preds[m] = float(np.mean(x)) if x.size else np.nan
     return pd.Series(preds)
@@ -175,7 +214,7 @@ def r2_and_mae(y_true: np.ndarray, y_pred: np.ndarray):
     return float(r2), float(mae)
 
 # -------------------------------
-# 성능 테이블 생성
+# 성능 테이블
 # -------------------------------
 target_vec = df.query("year == @target_year").sort_values("month")["temp"].to_numpy()
 candidate_starts = [y for y in years if y < target_year]
@@ -189,16 +228,15 @@ for s in candidate_starts:
 
 perf = pd.DataFrame(rows).dropna().sort_values("시작연도").reset_index(drop=True)
 if perf.empty:
-    st.error("대상연도 또는 데이터 구간이 유효하지 않아 성능표가 비었어. 대상연도를 바꾸거나 데이터를 확인해줘.")
+    st.error("성능표가 비었어. 대상연도/데이터 구간을 확인해줘.")
     st.stop()
 
-# Top3
 top3 = (perf.sort_values("R2", ascending=False).head(3)
         if metric_for_top.startswith("R²") else
         perf.sort_values("MAE", ascending=True).head(3))
 
 # -------------------------------
-# 화면: 표 + R² 곡선
+# 화면
 # -------------------------------
 st.markdown(f"### {note}")
 st.caption(f"대상연도={target_year}, 이상저온 컷={lower_tail}% | 예측치: [시작연도~{target_year-1}] 월평균(하위 p% 제외)")
@@ -221,7 +259,6 @@ fig.add_trace(go.Scatter(
     name="R² (train fit)"
 ))
 
-# Top1~3 음영 강조
 def add_span(fig, start_y, color, name):
     fig.add_vrect(x0=start_y-0.5, x1=perf["시작연도"].max()+0.5,
                   fillcolor=color, opacity=0.12, line_width=0,
@@ -231,7 +268,6 @@ palette = ["#4CAF50", "#607D8B", "#009688"]
 for i, (_, r) in enumerate(top3.sort_values("시작연도").iterrows()):
     add_span(fig, int(r["시작연도"]), palette[i], f"Top{i+1}: {int(r['시작연도'])}~현재")
 
-# '최근 3년' 시작점 별표
 s3 = int(target_year - 3)
 if s3 in perf["시작연도"].values:
     r2_3 = perf.loc[perf["시작연도"] == s3, "R2"].values[0]
@@ -252,5 +288,4 @@ with st.expander("내부 검증 메모 (MAE 요약)"):
     tbl2["R2"]  = tbl2["R2"].map(lambda x: f"{x:.4f}")
     st.dataframe(tbl2, use_container_width=True)
 
-st.success("최근 연도만으로 구성된 '운영상 최근평년(하위 p% 제외)'이 대상연도 월평균을 가장 잘 근사합니다. "
-           "특히 3년 창이 우수하며, 가정용 수요예측 입력기온으로 합리적입니다.")
+st.success("최근 연도 중심의 '운영상 최근평년(하위 p% 제외)'이 대상연도 월평균을 가장 잘 근사합니다. 특히 3년 창이 우수합니다.")
