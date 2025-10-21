@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# 심플: 목표연도 Y를 예측할 때, 직전 L년(1~5)의 월별 단순평균으로 만든 예측이
-# 실제 Y년 월별 기온과 얼마나 유사한지(R²) 비교. 가장 높은 L이 "최적 창".
+# 심플: 목표연도 Y를 예측할 때, 직전 L년(1~10)의 월별 "단순평균"으로 만든 예측이
+# 실제 Y년 월별 기온과 얼마나 유사한지(R²) 비교. 가장 높은 L을 자동 음영 강조.
 # 입력 엑셀: Wide([연도 | 1..12]) 또는 Long([날짜 | 평균기온]) 자동 인식.
 
 from pathlib import Path
@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="최근 L년 평균 vs 실제 — R² 곡선 (심플)", layout="wide")
+st.set_page_config(page_title="최근 L년 평균 vs 실제 — R² 곡선 (심플·확장)", layout="wide")
 
 # ----------------- 파서 (Wide/Long 자동) -----------------
 MONTH_ALIASES = {
@@ -72,7 +72,7 @@ def try_parse_long(df_raw: pd.DataFrame):
                 if s.notna().sum() >= max(12, int(len(s)*0.3)):
                     date_col = c; break
         if date_col is None: continue
-        # 값 열: '평균기온' 우선, 없으면 첫 번째 수치열
+        # 값 열: '평균기온' 우선, 없으면 첫 수치열
         val_col = None
         for c in body.columns:
             if str(c).strip() in ["평균기온","기온","temp","temperature"]:
@@ -123,8 +123,15 @@ years = sorted(df["year"].unique())
 min_year, max_year = int(min(years)), int(max(years))
 
 # ----------------- UI -----------------
-col1 = st.columns(1)[0]
-target_year = col1.number_input("대상연도(실제값 존재)", min_value=min_year+1, max_value=max_year, value=max_year, step=1)
+target_year = st.number_input("대상연도(실제값 존재)", min_value=min_year+1, max_value=max_year, value=max_year, step=1)
+
+# 고정 설명 문구(예시 자동 생성)
+ex_start = target_year - 3
+ex_end   = target_year - 1
+st.markdown(
+    f"**설명:** 예를 들어 **{target_year}년**을 예측할 때 **직전 3년 평균**을 쓰면 "
+    f"= **{ex_start}~{ex_end}** 월평균으로 {target_year}년 월별을 추정한다는 뜻."
+)
 
 st.markdown("### 추천 학습 데이터 기간 — R² 곡선")
 
@@ -141,10 +148,11 @@ def r2(y, yp):
     return float(1 - sse/sst) if sst>0 else np.nan
 
 rows=[]
-for L in range(1, 6):  # 1~5년 창
+for L in range(1, 11):  # 1~10년 창
     start = target_year - L
+    if start < min_year:  # 데이터 범위 밖이면 스킵
+        continue
     train = df.query("year >= @start and year <= @end_year")
-    # 월별 단순 평균(같은 달만)
     preds = []
     for m in range(1, 13):
         x = train.loc[train["month"]==m, "temp"].to_numpy()
@@ -152,7 +160,10 @@ for L in range(1, 6):  # 1~5년 창
     y_pred = np.array(preds, dtype=float)
     rows.append((L, r2(y_true, y_pred)))
 
-perf = pd.DataFrame(rows, columns=["L(년)", "R2"]).dropna()
+perf = pd.DataFrame(rows, columns=["L(년)", "R2"]).dropna().sort_values("L(년)")
+if perf.empty:
+    st.error("계산 가능한 L 구간이 없어. 대상연도·데이터 범위를 확인해줘.")
+    st.stop()
 
 best_row = perf.loc[perf["R2"].idxmax()]
 best_L, best_R2 = int(best_row["L(년)"]), float(best_row["R2"])
@@ -166,19 +177,34 @@ fig.add_trace(go.Scatter(
     textposition="top center",
     name="R²"
 ))
-# 최근 3년 L=3 위치에 별표
+
+# 최적 L 음영 강조(vrect)
+fig.add_vrect(
+    x0=best_L - 0.5, x1=best_L + 0.5,
+    fillcolor="#4CAF50", opacity=0.15, line_width=0,
+    annotation_text=f"최적 L={best_L}", annotation_position="top left"
+)
+
+# L=3 지점 별표
 if 3 in perf["L(년)"].values:
     r2_3 = perf.loc[perf["L(년)"]==3, "R2"].values[0]
-    fig.add_trace(go.Scatter(x=[3], y=[r2_3], mode="markers",
-                             marker=dict(size=14, symbol="star"),
-                             name="L=3(최근3년)"))
-fig.update_yaxes(title="R² (1에 가까울수록 좋음)", range=[max(0.0, perf["R2"].min()-0.01), min(1.0, perf["R2"].max()+0.01)])
-fig.update_xaxes(title=f"직전 L년 평균 (L=1~5), 대상연도={target_year} → 학습 구간: [Y-L .. Y-1]")
+    fig.add_trace(go.Scatter(
+        x=[3], y=[r2_3], mode="markers",
+        marker=dict(size=14, symbol="star"),
+        name="L=3(최근3년)"
+    ))
+
+# 축/레이아웃
+ymin = max(0.0, float(perf["R2"].min()) - 0.01)
+ymax = min(1.0, float(perf["R2"].max()) + 0.01)
+fig.update_yaxes(title="R² (1에 가까울수록 좋음)", range=[ymin, ymax])
+fig.update_xaxes(title=f"직전 L년 평균 (L=1~10), 대상연도={target_year} → 학습 구간: [Y-L .. Y-1]")
 fig.update_layout(height=520, margin=dict(l=10, r=10, t=30, b=10))
 st.plotly_chart(fig, use_container_width=True)
 
 # ----------------- 메시지(한 줄 요약) -----------------
-st.success(f"요약: **{target_year}년**을 예측할 때, **직전 {best_L}년 평균**이 가장 유사도(R²) 높음 (R²={best_R2:.4f})."
-           + ("  → ‘최근 3년 평균’이 최적임을 뒷받침." if best_L==3 else ""))
-
+st.success(
+    f"요약: **{target_year}년**을 예측할 때, **직전 {best_L}년 평균**이 가장 유사도(R²) 높음 "
+    f"(R²={best_R2:.4f})."
+)
 st.caption(f"(시트: {used_sheet}, 모드: {mode})")
