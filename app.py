@@ -40,6 +40,11 @@ def norm_month(col)->int|None:
         s = str(col).strip().lower().replace(" ","").replace("월","")
     return MONTH_ALIASES.get(s)
 
+def _normalize_korean(s: str) -> str:
+    # 괄호/기호 제거, 공백 제거, 소문자
+    t = re.sub(r"[()\[\]{}℃°/·\s]", "", str(s)).lower()
+    return t
+
 def try_parse_wide(df_raw: pd.DataFrame):
     for header_row in range(0, min(5, len(df_raw))):
         hdr = list(df_raw.iloc[header_row])
@@ -65,35 +70,46 @@ def try_parse_wide(df_raw: pd.DataFrame):
     return None
 
 def try_parse_long(df_raw: pd.DataFrame):
+    # 일단위(날짜, 평균기온(℃)) 시트 → 연·월별 평균으로 집계
     for header_row in range(0, min(5, len(df_raw))):
         hdr = list(df_raw.iloc[header_row])
         body = df_raw.iloc[header_row+1:].copy(); body.columns = hdr
+
+        # 날짜 컬럼 찾기
         date_col = None
         for c in body.columns:
-            if str(c).strip().lower() in ["날짜","date","일자","일시","dt"]:
+            if _normalize_korean(c) in ["날짜","date","일자","일시","dt"]:
                 date_col = c; break
         if date_col is None:
             for c in body.columns:
                 s = pd.to_datetime(body[c], errors="coerce")
                 if s.notna().sum() >= max(12, int(len(s)*0.3)):
                     date_col = c; break
-        if date_col is None: continue
+        if date_col is None: 
+            continue
+
+        # 값 컬럼 찾기(평균기온(℃), 기온, temp 등 폭넓게 허용)
         val_col = None
         for c in body.columns:
-            if str(c).strip() in ["평균기온","기온","temp","temperature"]:
+            norm = _normalize_korean(c)
+            if norm.startswith("평균기온") or norm == "평균기온" or norm == "기온" or norm in ["temp","temperature"]:
                 val_col = c; break
         if val_col is None:
             nums = [c for c in body.columns if c!=date_col and pd.to_numeric(body[c], errors="coerce").notna().sum()>=max(12, int(len(body)*0.3))]
             if nums: val_col = nums[0]
-        if val_col is None: continue
+        if val_col is None: 
+            continue
 
         df = body[[date_col, val_col]].copy().rename(columns={date_col:"date", val_col:"temp"})
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df["temp"] = pd.to_numeric(df["temp"], errors="coerce")
         df = df.dropna(subset=["date","temp"])
-        df["year"] = df["date"].dt.year
-        df["month"]= df["date"].dt.month
-        long = (df.groupby(["year","month"], as_index=False)["temp"].mean()
+
+        # ← 여기서 '연·월별 산술평균' 생성
+        df["year"]  = df["date"].dt.year
+        df["month"] = df["date"].dt.month
+        long = (df.groupby(["year","month"], as_index=False)["temp"]
+                  .mean()
                   .sort_values(["year","month"]))
         if long["year"].nunique() >= 6:
             return long
@@ -134,8 +150,8 @@ def build_pred_from_train_all(df, start:int, end:int, months_order:list):
     return np.array(preds, dtype=float)
 
 # --------------------- 데이터 로딩 ---------------------
-default_path = Path("기온예측.xlsx")
-uploaded = st.file_uploader("월별 평균기온 파일 업로드 (.xlsx)", type=["xlsx"])
+default_path = Path("기온_198001_202509.xlsx")  # ← 기본 파일명 교체
+uploaded = st.file_uploader("일별 평균기온 파일 업로드 (.xlsx) — [날짜 | 평균기온(℃)] 또는 [연도 | 1..12]", type=["xlsx"])
 df, used_sheet, mode = None, None, None
 if uploaded:
     df, used_sheet, mode = load_excel_any(uploaded)
@@ -143,7 +159,7 @@ elif default_path.exists():
     df, used_sheet, mode = load_excel_any(default_path)
 
 if df is None:
-    st.error("엑셀에서 월별 평균기온을 찾지 못했어. 형식: A) [연도|1..12] 또는 B) [날짜|평균기온].")
+    st.error("엑셀에서 월별 평균기온을 찾지 못했어. 형식: A) [연도|1..12] 또는 B) [날짜|평균기온(℃)] — 일 데이터는 자동으로 월 평균으로 집계함.")
     st.stop()
 
 years = sorted(df["year"].unique())
