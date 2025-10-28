@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# 최근 L년 평균 vs 실제 — 연속구간 비교 + "월별 vs 연평균" R² 비교 + 백테스트 요약(+1–4 vs 5–10 KPI)
+# 최근 L년 평균 vs 실제 — 연속구간 비교 + "월별 vs 연평균" R² 비교 + 백테스트 요약(+1–4년 vs 5년 이상)
 
 from pathlib import Path
 import re
@@ -83,7 +83,7 @@ def try_parse_long(df_raw: pd.DataFrame):
                 s = pd.to_datetime(body[c], errors="coerce")
                 if s.notna().sum() >= max(12, int(len(s)*0.3)):
                     date_col = c; break
-        if date_col is None:
+        if date_col is None: 
             continue
 
         val_col = None
@@ -94,7 +94,7 @@ def try_parse_long(df_raw: pd.DataFrame):
         if val_col is None:
             nums = [c for c in body.columns if c!=date_col and pd.to_numeric(body[c], errors="coerce").notna().sum()>=max(12, int(len(body)*0.3))]
             if nums: val_col = nums[0]
-        if val_col is None:
+        if val_col is None: 
             continue
 
         df = body[[date_col, val_col]].copy().rename(columns={date_col:"date", val_col:"temp"})
@@ -288,24 +288,22 @@ with tab2:
     c2.metric("중간(4년) 최적 연도비중",   f"{mcnt}개 연도", f"{pct(mcnt):.1f}%")
     c3.metric("장기(5년+) 최적 연도비중",  f"{lcnt}개 연도", f"{pct(lcnt):.1f}%")
 
-    # ====== [추가] 최적 L의 범위별(1–4년 vs 5–10년) 집계 및 KPI/그래프 ======
-    bins = pd.IntervalIndex.from_tuples([(0, 4), (4, 10)], closed="right")  # (0,4], (4,10]
-    labels = ["1–4년", "5–10년"]
-    L_range = pd.cut(best_per_Y["L"], bins=bins, labels=labels)
-    range_counts = (L_range.value_counts()
-                    .reindex(labels)          # 순서 고정
-                    .fillna(0).astype(int))
-    range_df = pd.DataFrame({"구간": labels, "연도수": range_counts.values})
+    # ====== 1–4년 vs 5년 이상: 범위별 집계/KPI/막대 ======
+    cnt_1_4 = int((best_per_Y["L"].between(1, 4)).sum())
+    cnt_5p  = int((best_per_Y["L"] >= 5).sum())
+    total2  = max(1, cnt_1_4 + cnt_5p)
+    def pct2(v): return v / total2 * 100.0
 
     c4, c5 = st.columns(2)
-    c4.metric("최적 L: 1–4년 구간",  f"{range_counts['1–4년']}개 연도", f"{pct(range_counts['1–4년']):.1f}%")
-    c5.metric("최적 L: 5–10년 구간", f"{range_counts['5–10년']}개 연도", f"{pct(range_counts['5–10년']):.1f}%")
+    c4.metric("최적 L: 1–4년",  f"{cnt_1_4}개 연도", f"{pct2(cnt_1_4):.1f}%")
+    c5.metric("최적 L: 5년 이상", f"{cnt_5p}개 연도",  f"{pct2(cnt_5p):.1f}%")
 
-    bar = px.bar(range_df, x="구간", y="연도수", text="연도수")
-    bar.update_traces(textposition="outside")
-    bar.update_layout(yaxis_title="연도수", xaxis_title="최적 L 범위")
-    tidy_layout(bar, title="최적 L 범위별(1–4년 vs 5–10년) 연도수", height=340)
-    st.plotly_chart(bar, use_container_width=True)
+    range_df2 = pd.DataFrame({"구간": ["1–4년", "5년 이상"], "연도수": [cnt_1_4, cnt_5p]})
+    bar2 = px.bar(range_df2, x="구간", y="연도수", text="연도수")
+    bar2.update_traces(textposition="outside")
+    bar2.update_layout(yaxis_title="연도수", xaxis_title="최적 L 범위")
+    tidy_layout(bar2, title="최적 L 범위별(1–4년 vs 5년 이상) 연도수", height=340)
+    st.plotly_chart(bar2, use_container_width=True)
 
     # 최적 L 추이
     fig_bestL = go.Figure()
