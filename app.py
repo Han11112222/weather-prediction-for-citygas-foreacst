@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# 최근 L년 평균 vs 실제 — "연속 구간" 비교(직전 Y-L..Y-1만 후보) + 최적 L 추이 + 근거표시
+# 최근 L년 평균 vs 실제 — 연속구간 비교 + "월별 vs 연평균" R² 비교 토글
 
 from pathlib import Path
 import re
@@ -9,7 +9,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="최근 L년 평균 vs 실제 — 연속구간 비교", layout="wide")
+st.set_page_config(page_title="최근 L년 평균 vs 실제 — 연속구간 + 월별 vs 연평균 비교", layout="wide")
 
 # ---------- 공통 레이아웃 ----------
 def tidy_layout(fig, title=None, height=360):
@@ -83,7 +83,7 @@ def try_parse_long(df_raw: pd.DataFrame):
                 s = pd.to_datetime(body[c], errors="coerce")
                 if s.notna().sum() >= max(12, int(len(s)*0.3)):
                     date_col = c; break
-        if date_col is None:
+        if date_col is None: 
             continue
 
         val_col = None
@@ -94,7 +94,7 @@ def try_parse_long(df_raw: pd.DataFrame):
         if val_col is None:
             nums = [c for c in body.columns if c!=date_col and pd.to_numeric(body[c], errors="coerce").notna().sum()>=max(12, int(len(body)*0.3))]
             if nums: val_col = nums[0]
-        if val_col is None:
+        if val_col is None: 
             continue
 
         df = body[[date_col, val_col]].copy().rename(columns={date_col:"date", val_col:"temp"})
@@ -139,7 +139,8 @@ def build_y_true(df, Y:int):
     y_df = df.query("year == @Y").sort_values("month")
     return y_df["month"].tolist(), y_df["temp"].to_numpy()
 
-def build_pred_from_prev_L(df, start:int, end:int, months_order:list):
+def build_pred_monthly(df, start:int, end:int, months_order:list):
+    """월별 평균 방식(계절성 유지): 각 월 m에 대해 start..end 구간의 m월 평균."""
     train = df.query("year >= @start and year <= @end").copy()
     preds=[]
     for m in months_order:
@@ -147,8 +148,15 @@ def build_pred_from_prev_L(df, start:int, end:int, months_order:list):
         preds.append(np.mean(x) if x.size>0 else np.nan)
     return np.array(preds, dtype=float)
 
+def build_pred_annual(df, start:int, end:int, months_order:list):
+    """연평균 방식(계절성 제거): 각 연도의 1~12월 평균 → 그걸 L년 평균 → 12개월 모두 동일값."""
+    g = df.query("year >= @start and year <= @end").groupby("year")["temp"].mean()
+    if g.size == 0: return np.full(len(months_order), np.nan)
+    scalar = float(g.mean())   # L개 연도의 연평균들의 평균
+    return np.full(len(months_order), scalar, dtype=float)
+
 # ---------- 데이터 로딩 ----------
-default_path = Path("기온_198001_202509.xlsx")
+default_path = Path("기온_198001_202509.xlsx")  # 업로드 없으면 자동 사용
 uploaded = st.file_uploader("기온 파일(.xlsx) — [연도|1..12] 또는 [날짜|평균기온(℃)]", type=["xlsx"])
 df, used_sheet, mode = (load_excel_any(uploaded) if uploaded else
                         (load_excel_any(default_path) if default_path.exists() else (None,None,None)))
@@ -161,20 +169,22 @@ years = sorted(df["year"].unique())
 min_year, max_year = int(min(years)), int(max(years))
 
 # ================== 탭 ==================
-tab1, tab2 = st.tabs(["단일연도 검증", "백테스트 요약"])
+tab1, tab2 = st.tabs(["단일연도 검증(월별 vs 연평균 비교)", "백테스트 요약"])
 
-# ---------- 탭1: 단일연도 ----------
+# ---------- 탭1: 단일연도(두 방식 비교) ----------
 with tab1:
-    c1, c2 = st.columns([1,1])
+    c1, c2, c3 = st.columns([1,1,1])
     with c1:
         target_year = st.number_input("대상연도(실제값 존재)", min_value=min_year+1, max_value=max_year, value=max_year)
     with c2:
         Lmax = st.slider("비교할 최대 L(년)", 3, 15, 10)
+    with c3:
+        show_table = st.toggle("결과 테이블 표시", value=True)
 
-    # ⚠ 여기서 'k'는 예시 문자이므로 f-string 안에서 값으로 평가하지 않게 작성
     st.caption(
-        f"평가 규칙: **연속 구간만** 비교. 예) 대상연도 {target_year}라면 "
-        f"L=1 → [{target_year-1}], L=2 → [{target_year-2}~{target_year-1}], … L=k → [Y-k~Y-1]"
+        f"평가 규칙(연속 구간): 대상연도 {target_year}일 때 L=1→[{target_year-1}], "
+        f"L=2→[{target_year-2}~{target_year-1}], … L=k→[Y-k~Y-1]. "
+        "월별 방식은 동월 평균(계절성 유지), 연평균 방식은 L년 연평균의 평균값을 12개월 동일 적용(계절성 제거)."
     )
 
     months, y_true = build_y_true(df, target_year)
@@ -183,44 +193,49 @@ with tab1:
     for L in range(1, Lmax+1):
         start = target_year - L
         if start < min_year: continue
-        y_pred = build_pred_from_prev_L(df, start, target_year-1, months)
-        rows.append((L, r2(y_true, y_pred), mae(y_true, y_pred)))
-    perf = pd.DataFrame(rows, columns=["L(년)","R2","MAE"]).dropna().sort_values("L(년)")
+        y_pred_m = build_pred_monthly(df, start, target_year-1, months)
+        y_pred_a = build_pred_annual(df, start, target_year-1, months)
+        rows.append((
+            L, r2(y_true, y_pred_m), mae(y_true, y_pred_m),
+            r2(y_true, y_pred_a), mae(y_true, y_pred_a)
+        ))
+    perf = pd.DataFrame(rows, columns=["L(년)","R2_월별","MAE_월별","R2_연평균","MAE_연평균"]).dropna().sort_values("L(년)")
 
-    if perf.empty:
-        st.warning("비교 가능한 L 구간이 부족해.")
-    else:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=perf["L(년)"], y=perf["R2"], mode="lines+markers+text",
-                                 text=[f"{v:.4f}" for v in perf["R2"]],
-                                 textposition="top center", name="R²"))
-        best_idx = perf["R2"].idxmax()
-        best_L, best_R2 = int(perf.loc[best_idx, "L(년)"]), float(perf.loc[best_idx, "R2"])
-        fig.add_vrect(x0=best_L-0.5, x1=best_L+0.5, fillcolor="#4CAF50", opacity=0.15, line_width=0,
-                      annotation_text=f"최적 L={best_L}", annotation_position="top left")
-        if 3 in perf["L(년)"].values:
-            r2_3 = float(perf.loc[perf["L(년)"]==3, "R2"].values[0])
-            fig.add_trace(go.Scatter(x=[3], y=[r2_3], mode="markers",
-                                     marker=dict(size=14, symbol="star"),
-                                     name="L=3(최근3년)"))
-        ymin = max(0.0, float(perf["R2"].min())-0.01); ymax = min(1.0, float(perf["R2"].max())+0.01)
-        fig.update_yaxes(title="R² (1에 가까울수록 유사)", range=[ymin, ymax])
-        fig.update_xaxes(title=f"‘직전 L년’ 연속 평균으로 {target_year} 예측")
-        tidy_layout(fig, title=f"R² 곡선 — {target_year}년, 연속 L 비교", height=520)
-        st.plotly_chart(fig, use_container_width=True)
+    # ----- 곡선(두 방식 오버레이) -----
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=perf["L(년)"], y=perf["R2_월별"], mode="lines+markers+text",
+                             text=[f"{v:.4f}" for v in perf["R2_월별"]],
+                             textposition="top center", name="R²(월별)"))
+    fig.add_trace(go.Scatter(x=perf["L(년)"], y=perf["R2_연평균"], mode="lines+markers",
+                             name="R²(연평균)", line=dict(dash="dot")))
+    # 최적 L(월별 기준)
+    best_idx = perf["R2_월별"].idxmax()
+    best_L, best_R2 = int(perf.loc[best_idx, "L(년)"]), float(perf.loc[best_idx, "R2_월별"])
+    fig.add_vrect(x0=best_L-0.5, x1=best_L+0.5, fillcolor="#4CAF50", opacity=0.15, line_width=0,
+                  annotation_text=f"최적 L(월별)={best_L}", annotation_position="top left")
 
-        show = perf.copy()
-        show["비교구간"] = show["L(년)"].apply(lambda L: f"{target_year-L}~{target_year-1}")
-        show = show[["L(년)","비교구간","R2","MAE"]].sort_values(["R2","L(년)"], ascending=[False, True])
-        st.dataframe(show.style.format({"R2":"{:.4f}","MAE":"{:.3f}"}), use_container_width=True)
+    ymin = max(0.0, float(min(perf["R2_월별"].min(), perf["R2_연평균"].min()))-0.01)
+    ymax = min(1.0, float(max(perf["R2_월별"].max(), perf["R2_연평균"].max()))+0.01)
+    fig.update_yaxes(title="R² (1에 가까울수록 유사)", range=[ymin, ymax])
+    fig.update_xaxes(title=f"{target_year}년 예측 — ‘직전 L년’ 연속 평균 (월별 vs 연평균)")
+    tidy_layout(fig, title=f"R² 곡선 비교 — 월별(계절성 유지) vs 연평균(계절성 제거)", height=520)
+    st.plotly_chart(fig, use_container_width=True)
 
-        st.success(
-            f"**해석 요약** — {target_year}년의 월별 실제기온과 가장 유사한 평균은 "
-            f"**직전 {best_L}개 연도[{target_year-best_L}~{target_year-1}]**의 월평균이며, "
-            f"R²={best_R2:.4f}."
-        )
+    if show_table:
+        table = perf.copy()
+        table["ΔR2(월별-연평균)"] = table["R2_월별"] - table["R2_연평균"]
+        table["비교구간"] = table["L(년)"].apply(lambda L: f"{target_year-L}~{target_year-1}")
+        table = table[["L(년)","비교구간","R2_월별","R2_연평균","ΔR2(월별-연평균)","MAE_월별","MAE_연평균"]]
+        st.dataframe(table.style.format({"R2_월별":"{:.4f}","R2_연평균":"{:.4f}","ΔR2(월별-연평균)":"{:.4f}",
+                                         "MAE_월별":"{:.3f}","MAE_연평균":"{:.3f}"}),
+                     use_container_width=True)
 
-# ---------- 탭2: 백테스트 요약 ----------
+    st.success(
+        f"**해석 요약** — {target_year}년 기준, 월별 방식의 최적 L={best_L}, R²={best_R2:.4f}. "
+        "연평균 방식 대비 ΔR²(월별-연평균)이 양(+)이면 **계절성 보존 모델이 더 타당**하다는 근거가 강화된다."
+    )
+
+# ---------- 탭2: 기존 백테스트 요약(월별 방식 기준) ----------
 with tab2:
     colA, colB = st.columns([1,1])
     with colA:
@@ -236,7 +251,7 @@ with tab2:
             start = Y - L
             if start < min_year:
                 mat_rows.append((Y,L,np.nan)); continue
-            y_pred = build_pred_from_prev_L(df, start, Y-1, months_Y)
+            y_pred = build_pred_monthly(df, start, Y-1, months_Y)
             mat_rows.append((Y, L, r2(y_true_Y, y_pred)))
     mat = pd.DataFrame(mat_rows, columns=["Y","L","R2"])
 
@@ -253,18 +268,8 @@ with tab2:
                  color="구분",
                  color_discrete_map={"최근(1–3년)":"#1976D2","중간(4년)":"#E53935","장기(5년+)":"#64B5F6"})
     pie.update_traces(textposition="inside", texttemplate="%{percent:.1%}\n(%{value}개 연도)")
-    tidy_layout(pie, title="연도별 최적 L 분포(연속 구간만)", height=360)
+    tidy_layout(pie, title="연도별 최적 L 분포(월별 방식 기준)", height=360)
     st.plotly_chart(pie, use_container_width=True)
-
-    total = int(dist["연도수"].sum())
-    get_cnt = lambda name: int(dist.loc[dist["구분"]==name, "연도수"].sum())
-    pct = (lambda v: 0 if total==0 else v/total*100)
-
-    c1, c2, c3 = st.columns(3)
-    rcnt, mcnt, lcnt = get_cnt("최근(1–3년)"), get_cnt("중간(4년)"), get_cnt("장기(5년+)")
-    c1.metric("최근(1–3년) 최적 연도비중", f"{rcnt}개 연도", f"{pct(rcnt):.1f}%")
-    c2.metric("중간(4년) 최적 연도비중",   f"{mcnt}개 연도", f"{pct(mcnt):.1f}%")
-    c3.metric("장기(5년+) 최적 연도비중",  f"{lcnt}개 연도", f"{pct(lcnt):.1f}%")
 
     fig_bestL = go.Figure()
     fig_bestL.add_hrect(y0=0.5, y1=3.5, fillcolor="#E3F2FD", opacity=0.35, line_width=0)
@@ -274,17 +279,17 @@ with tab2:
                                    mode="lines+markers+text",
                                    text=[str(int(v)) for v in best_per_Y["L"]],
                                    textposition="top center",
-                                   name="최적 L"))
+                                   name="최적 L(월별)"))
     fig_bestL.add_hline(y=3, line_dash="dot", line_color="#888")
     fig_bestL.update_yaxes(title="최적 L(년)", dtick=1, range=[1,10.1])
     fig_bestL.update_xaxes(title="목표연도 Y")
-    tidy_layout(fig_bestL, title="연도별 최적 L 추이(낮을수록 최근 중심)")
+    tidy_layout(fig_bestL, title="연도별 최적 L 추이(월별 방식)", height=400)
     st.plotly_chart(fig_bestL, use_container_width=True)
 
     heat_df = mat.pivot(index="Y", columns="L", values="R2").sort_index()
     fig_hm = px.imshow(heat_df, labels=dict(x="L(년)", y="Y(목표연도)", color="R²"),
                        aspect="auto", color_continuous_scale="Blues", origin="lower")
-    tidy_layout(fig_hm, title="세부 R² Heatmap — Y×L (연속 구간)", height=520)
+    tidy_layout(fig_hm, title="세부 R² Heatmap — Y×L (월별 방식)", height=520)
     st.plotly_chart(fig_hm, use_container_width=True)
 
     st.caption(f"(시트: {used_sheet}, 모드: {mode}, 규칙: ‘직전 L년 연속’만 후보)")
