@@ -83,7 +83,7 @@ def try_parse_long(df_raw: pd.DataFrame):
                 s = pd.to_datetime(body[c], errors="coerce")
                 if s.notna().sum() >= max(12, int(len(s)*0.3)):
                     date_col = c; break
-        if date_col is None: 
+        if date_col is None:
             continue
 
         val_col = None
@@ -94,7 +94,7 @@ def try_parse_long(df_raw: pd.DataFrame):
         if val_col is None:
             nums = [c for c in body.columns if c!=date_col and pd.to_numeric(body[c], errors="coerce").notna().sum()>=max(12, int(len(body)*0.3))]
             if nums: val_col = nums[0]
-        if val_col is None: 
+        if val_col is None:
             continue
 
         df = body[[date_col, val_col]].copy().rename(columns={date_col:"date", val_col:"temp"})
@@ -140,7 +140,6 @@ def build_y_true(df, Y:int):
     return y_df["month"].tolist(), y_df["temp"].to_numpy()
 
 def build_pred_from_prev_L(df, start:int, end:int, months_order:list):
-    # 학습: 연속구간 [start..end] (end=Y-1)
     train = df.query("year >= @start and year <= @end").copy()
     preds=[]
     for m in months_order:
@@ -149,7 +148,7 @@ def build_pred_from_prev_L(df, start:int, end:int, months_order:list):
     return np.array(preds, dtype=float)
 
 # ---------- 데이터 로딩 ----------
-default_path = Path("기온_198001_202509.xlsx")  # 업로드 없으면 자동 사용
+default_path = Path("기온_198001_202509.xlsx")
 uploaded = st.file_uploader("기온 파일(.xlsx) — [연도|1..12] 또는 [날짜|평균기온(℃)]", type=["xlsx"])
 df, used_sheet, mode = (load_excel_any(uploaded) if uploaded else
                         (load_excel_any(default_path) if default_path.exists() else (None,None,None)))
@@ -172,9 +171,10 @@ with tab1:
     with c2:
         Lmax = st.slider("비교할 최대 L(년)", 3, 15, 10)
 
+    # ⚠ 여기서 'k'는 예시 문자이므로 f-string 안에서 값으로 평가하지 않게 작성
     st.caption(
-        f"평가 규칙: **연속 구간만** 비교. 예) 대상연도 {target_year}라면 L=1→[{target_year-1}], "
-        f"L=2→[{target_year-2}~{target_year-1}], ... L=k→[{target_year-k}~{target_year-1}]"
+        f"평가 규칙: **연속 구간만** 비교. 예) 대상연도 {target_year}라면 "
+        f"L=1 → [{target_year-1}], L=2 → [{target_year-2}~{target_year-1}], … L=k → [Y-k~Y-1]"
     )
 
     months, y_true = build_y_true(df, target_year)
@@ -190,7 +190,6 @@ with tab1:
     if perf.empty:
         st.warning("비교 가능한 L 구간이 부족해.")
     else:
-        # 곡선
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=perf["L(년)"], y=perf["R2"], mode="lines+markers+text",
                                  text=[f"{v:.4f}" for v in perf["R2"]],
@@ -210,48 +209,46 @@ with tab1:
         tidy_layout(fig, title=f"R² 곡선 — {target_year}년, 연속 L 비교", height=520)
         st.plotly_chart(fig, use_container_width=True)
 
-        # 근거 표(정렬: R² desc)
         show = perf.copy()
         show["비교구간"] = show["L(년)"].apply(lambda L: f"{target_year-L}~{target_year-1}")
         show = show[["L(년)","비교구간","R2","MAE"]].sort_values(["R2","L(년)"], ascending=[False, True])
         st.dataframe(show.style.format({"R2":"{:.4f}","MAE":"{:.3f}"}), use_container_width=True)
 
-        # 설명 문구
         st.success(
             f"**해석 요약** — {target_year}년의 월별 실제기온과 가장 유사한 평균은 "
             f"**직전 {best_L}개 연도[{target_year-best_L}~{target_year-1}]**의 월평균이며, "
-            f"R²={best_R2:.4f}. 따라서 {target_year+1}년(예: 2026년) 예측 시 ‘최근 3년’이 "
-            f"거의 항상 상위 후보인지(혹은 최적) 여부를 아래 백테스트 요약에서 확인 가능."
+            f"R²={best_R2:.4f}."
         )
 
-# ---------- 탭2: 백테스트 요약(여러 연도) ----------
+# ---------- 탭2: 백테스트 요약 ----------
 with tab2:
     colA, colB = st.columns([1,1])
     with colA:
-        y_from = st.number_input("목표연도 시작", min_value=min_year+1, max_value=max_year-1, value=max(min_year+5, max_year-10))
+        y_from = st.number_input("목표연도 시작", min_value=min_year+1, max_value=max_year-1,
+                                 value=max(min_year+5, max_year-10))
     with colB:
         y_to   = st.number_input("목표연도 종료", min_value=y_from, max_value=max_year, value=max_year)
 
-    # (Y,L) R² 매트릭스 — 후보는 모두 "연속 구간"
     mat_rows=[]
     for Y in range(int(y_from), int(y_to)+1):
         months_Y, y_true_Y = build_y_true(df, Y)
         for L in range(1, 11):
             start = Y - L
-            if start < min_year: mat_rows.append((Y,L,np.nan)); continue
+            if start < min_year:
+                mat_rows.append((Y,L,np.nan)); continue
             y_pred = build_pred_from_prev_L(df, start, Y-1, months_Y)
             mat_rows.append((Y, L, r2(y_true_Y, y_pred)))
     mat = pd.DataFrame(mat_rows, columns=["Y","L","R2"])
 
-    # 연도별 최적 L
     best_per_Y = mat.loc[mat.groupby("Y")["R2"].idxmax()][["Y","L","R2"]].dropna().sort_values("Y")
     best_per_Y["구분"] = np.where(best_per_Y["L"]<=3, "최근(1–3년)",
                            np.where(best_per_Y["L"]==4, "중간(4년)", "장기(5년+)"))
 
-    # 도넛 + KPI
     dist = (best_per_Y["구분"].value_counts()
-            .reindex(["최근(1–3년)","중간(4년)","장기(5년+)"]).fillna(0).reset_index())
+            .reindex(["최근(1–3년)","중간(4년)","장기(5년+)"])
+            .fillna(0).reset_index())
     dist.columns = ["구분","연도수"]
+
     pie = px.pie(dist, names="구분", values="연도수", hole=0.35,
                  color="구분",
                  color_discrete_map={"최근(1–3년)":"#1976D2","중간(4년)":"#E53935","장기(5년+)":"#64B5F6"})
@@ -259,34 +256,31 @@ with tab2:
     tidy_layout(pie, title="연도별 최적 L 분포(연속 구간만)", height=360)
     st.plotly_chart(pie, use_container_width=True)
 
-    total_years = int(dist["연도수"].sum())
-    def pct(v): return 0 if total_years==0 else v/total_years*100.0
-    c1, c2, c3 = st.columns(3)
-    c1.metric("최근(1–3년) 최적 연도비중", f"{int(dist.loc[0,'연도수'])}개 연도", f"{pct(int(dist.loc[0,'연도수'])):.1f}%")
-    c2.metric("중간(4년) 최적 연도비중",   f"{int(dist.loc[dist['구분']=='중간(4년)','연도수'].values[0])}개 연도",
-                                   f"{pct(int(dist.loc[dist['구분']=='중간(4년)','연도수'].values[0])):.1f}%")
-    c3.metric("장기(5년+) 최적 연도비중",  f"{int(dist.loc[dist['구분']=='장기(5년+)','연도수'].values[0])}개 연도",
-                                   f"{pct(int(dist.loc[dist['구분']=='장기(5년+)','연도수'].values[0])):.1f}%")
+    total = int(dist["연도수"].sum())
+    get_cnt = lambda name: int(dist.loc[dist["구분"]==name, "연도수"].sum())
+    pct = (lambda v: 0 if total==0 else v/total*100)
 
-    # 최적 L 추이
+    c1, c2, c3 = st.columns(3)
+    rcnt, mcnt, lcnt = get_cnt("최근(1–3년)"), get_cnt("중간(4년)"), get_cnt("장기(5년+)")
+    c1.metric("최근(1–3년) 최적 연도비중", f"{rcnt}개 연도", f"{pct(rcnt):.1f}%")
+    c2.metric("중간(4년) 최적 연도비중",   f"{mcnt}개 연도", f"{pct(mcnt):.1f}%")
+    c3.metric("장기(5년+) 최적 연도비중",  f"{lcnt}개 연도", f"{pct(lcnt):.1f}%")
+
     fig_bestL = go.Figure()
-    fig_bestL.add_hrect(y0=0.5, y1=3.5, fillcolor="#E3F2FD", opacity=0.35, line_width=0)  # 최근
-    fig_bestL.add_hrect(y0=3.5, y1=4.5, fillcolor="#FFEBEE", opacity=0.35, line_width=0)  # 중간
-    fig_bestL.add_hrect(y0=4.5, y1=10.5, fillcolor="#E8F5E9", opacity=0.25, line_width=0) # 장기
-    fig_bestL.add_trace(go.Scatter(
-        x=best_per_Y["Y"], y=best_per_Y["L"],
-        mode="lines+markers+text",
-        text=[str(int(v)) for v in best_per_Y["L"]],
-        textposition="top center",
-        name="최적 L"
-    ))
+    fig_bestL.add_hrect(y0=0.5, y1=3.5, fillcolor="#E3F2FD", opacity=0.35, line_width=0)
+    fig_bestL.add_hrect(y0=3.5, y1=4.5, fillcolor="#FFEBEE", opacity=0.35, line_width=0)
+    fig_bestL.add_hrect(y0=4.5, y1=10.5, fillcolor="#E8F5E9", opacity=0.25, line_width=0)
+    fig_bestL.add_trace(go.Scatter(x=best_per_Y["Y"], y=best_per_Y["L"],
+                                   mode="lines+markers+text",
+                                   text=[str(int(v)) for v in best_per_Y["L"]],
+                                   textposition="top center",
+                                   name="최적 L"))
     fig_bestL.add_hline(y=3, line_dash="dot", line_color="#888")
     fig_bestL.update_yaxes(title="최적 L(년)", dtick=1, range=[1,10.1])
     fig_bestL.update_xaxes(title="목표연도 Y")
     tidy_layout(fig_bestL, title="연도별 최적 L 추이(낮을수록 최근 중심)")
     st.plotly_chart(fig_bestL, use_container_width=True)
 
-    # 세부 Heatmap
     heat_df = mat.pivot(index="Y", columns="L", values="R2").sort_index()
     fig_hm = px.imshow(heat_df, labels=dict(x="L(년)", y="Y(목표연도)", color="R²"),
                        aspect="auto", color_continuous_scale="Blues", origin="lower")
